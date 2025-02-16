@@ -3,11 +3,12 @@ import { produce } from 'immer';
 import { merge } from 'lodash-es';
 
 import { DEFAULT_MODEL_PROVIDER_LIST } from '@/config/modelProviders';
+import { enableAuth } from '@/const/auth';
 import { INBOX_GUIDE_SYSTEMROLE } from '@/const/guide';
 import { INBOX_SESSION_ID } from '@/const/session';
 import { DEFAULT_AGENT_CONFIG } from '@/const/settings';
 import { TracePayload, TraceTagMap } from '@/const/trace';
-import { isServerMode } from '@/const/version';
+import { isDeprecatedEdition, isServerMode } from '@/const/version';
 import {
   AgentRuntime,
   AgentRuntimeError,
@@ -42,18 +43,21 @@ import { API_ENDPOINTS } from './_url';
 
 const isCanUseFC = (model: string, provider: string) => {
   // TODO: remove isDeprecatedEdition condition in V2.0
-  if (!isServerMode) {
+  if (isDeprecatedEdition) {
     return modelProviderSelectors.isModelEnabledFunctionCall(model)(useUserStore.getState());
   }
 
   return aiModelSelectors.isModelSupportToolUse(model, provider)(useAiInfraStore.getState());
 };
 
-const findAzureDeploymentName = (model: string) => {
+/**
+ * TODO: we need to update this function to auto find deploymentName with provider setting config
+ */
+const findDeploymentName = (model: string, provider: string) => {
   let deploymentId = model;
 
   // TODO: remove isDeprecatedEdition condition in V2.0
-  if (!isServerMode) {
+  if (isDeprecatedEdition) {
     const chatModelCards = modelProviderSelectors.getModelCardsById(ModelProvider.Azure)(
       useUserStore.getState(),
     );
@@ -62,7 +66,9 @@ const findAzureDeploymentName = (model: string) => {
     if (deploymentName) deploymentId = deploymentName;
   } else {
     // find the model by id
-    const modelItem = useAiInfraStore.getState().enabledAiModels?.find((i) => i.id === model);
+    const modelItem = useAiInfraStore
+      .getState()
+      .enabledAiModels?.find((i) => i.id === model && i.providerId === provider);
 
     if (modelItem && modelItem.config?.deploymentName) {
       deploymentId = modelItem.config?.deploymentName;
@@ -74,7 +80,7 @@ const findAzureDeploymentName = (model: string) => {
 
 const isEnableFetchOnClient = (provider: string) => {
   // TODO: remove this condition in V2.0
-  if (!isServerMode) {
+  if (isDeprecatedEdition) {
     return modelConfigSelectors.isProviderFetchOnClient(provider)(useUserStore.getState());
   } else {
     return aiProviderSelectors.isProviderFetchOnClient(provider)(useAiInfraStore.getState());
@@ -124,90 +130,25 @@ interface CreateAssistantMessageStream extends FetchSSEOptions {
  * **Note**: if you try to fetch directly, use `fetchOnClient` instead.
  */
 export function initializeWithClientStore(provider: string, payload: any) {
-  // add auth payload
+  /**
+   * Since #5267, we map parameters for client-fetch in function `getProviderAuthPayload`
+   * which called by `createPayloadWithKeyVaults` below.
+   * @see https://github.com/lobehub/lobe-chat/pull/5267
+   * @file src/services/_auth.ts
+   */
   const providerAuthPayload = { ...payload, ...createPayloadWithKeyVaults(provider) };
   const commonOptions = {
-    // Some provider base openai sdk, so enable it run on browser
+    // Allow OpenAI SDK and Anthropic SDK run on browser
     dangerouslyAllowBrowser: true,
   };
-  let providerOptions = {};
-
-  switch (provider) {
-    default:
-    case ModelProvider.OpenAI: {
-      providerOptions = {
-        baseURL: providerAuthPayload?.baseURL,
-      };
-      break;
-    }
-    case ModelProvider.Azure: {
-      providerOptions = {
-        apiKey: providerAuthPayload?.apiKey,
-        apiVersion: providerAuthPayload?.azureApiVersion,
-      };
-      break;
-    }
-    case ModelProvider.Google: {
-      providerOptions = {
-        baseURL: providerAuthPayload?.baseURL,
-      };
-      break;
-    }
-    case ModelProvider.Bedrock: {
-      if (providerAuthPayload?.apiKey) {
-        providerOptions = {
-          accessKeyId: providerAuthPayload?.awsAccessKeyId,
-          accessKeySecret: providerAuthPayload?.awsSecretAccessKey,
-          region: providerAuthPayload?.awsRegion,
-          sessionToken: providerAuthPayload?.awsSessionToken,
-        };
-      }
-      break;
-    }
-    case ModelProvider.Ollama: {
-      providerOptions = {
-        baseURL: providerAuthPayload?.baseURL,
-      };
-      break;
-    }
-    case ModelProvider.Perplexity: {
-      providerOptions = {
-        apikey: providerAuthPayload?.apiKey,
-        baseURL: providerAuthPayload?.baseURL,
-      };
-      break;
-    }
-    case ModelProvider.Anthropic: {
-      providerOptions = {
-        baseURL: providerAuthPayload?.baseURL,
-      };
-      break;
-    }
-    case ModelProvider.Groq: {
-      providerOptions = {
-        apikey: providerAuthPayload?.apiKey,
-        baseURL: providerAuthPayload?.baseURL,
-      };
-      break;
-    }
-    case ModelProvider.Cloudflare: {
-      providerOptions = {
-        apikey: providerAuthPayload?.apiKey,
-        baseURLOrAccountID: providerAuthPayload?.cloudflareBaseURLOrAccountID,
-      };
-      break;
-    }
-  }
-
   /**
    * Configuration override order:
-   * payload -> providerOptions -> providerAuthPayload -> commonOptions
+   * payload -> providerAuthPayload -> commonOptions
    */
   return AgentRuntime.initializeWithProviderOptions(provider, {
     [provider]: {
       ...commonOptions,
       ...providerAuthPayload,
-      ...providerOptions,
       ...payload,
     },
   });
@@ -286,8 +227,15 @@ class ChatService {
     let model = res.model || DEFAULT_AGENT_CONFIG.model;
 
     // if the provider is Azure, get the deployment name as the request model
-    if (provider === ModelProvider.Azure) {
-      model = findAzureDeploymentName(model);
+    const providersWithDeploymentName = [
+      ModelProvider.Azure,
+      ModelProvider.Volcengine,
+      ModelProvider.Doubao,
+      ModelProvider.AzureAI,
+    ] as string[];
+
+    if (providersWithDeploymentName.includes(provider)) {
+      model = findDeploymentName(model, provider);
     }
 
     const payload = merge(
@@ -341,7 +289,7 @@ class ChatService {
     const isBuiltin = Object.values(ModelProvider).includes(provider as any);
 
     // TODO: remove `!isDeprecatedEdition` condition in V2.0
-    if (isServerMode && !isBuiltin) {
+    if (!isDeprecatedEdition && !isBuiltin) {
       const providerConfig = aiProviderSelectors.providerConfigById(provider)(
         useAiInfraStore.getState(),
       );
@@ -359,9 +307,13 @@ class ChatService {
       onFinish: options?.onFinish,
       onMessageHandle: options?.onMessageHandle,
       signal,
-      // use smoothing when enable client fetch
-      // https://github.com/lobehub/lobe-chat/issues/3800
-      smoothing: providerConfig?.smoothing || enableFetchOnClient,
+      smoothing:
+        providerConfig?.settings?.smoothing ||
+        // @deprecated in V2
+        providerConfig?.smoothing ||
+        // use smoothing when enable client fetch
+        // https://github.com/lobehub/lobe-chat/issues/3800
+        enableFetchOnClient,
     });
   };
 
@@ -576,7 +528,7 @@ class ChatService {
      * if enable login and not signed in, return unauthorized error
      */
     const userStore = useUserStore.getState();
-    if (userStore.enableAuth() && !userStore.isSignedIn) {
+    if (enableAuth && !userStore.isSignedIn) {
       throw AgentRuntimeError.createError(ChatErrorType.InvalidAccessCode);
     }
 

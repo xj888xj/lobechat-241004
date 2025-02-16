@@ -1,4 +1,5 @@
 import { and, asc, desc, eq } from 'drizzle-orm/expressions';
+import { isEmpty } from 'lodash-es';
 
 import { LobeChatDatabase } from '@/database/type';
 import { ModelProvider } from '@/libs/agent-runtime';
@@ -165,11 +166,12 @@ export class AiProviderModel {
 
   getAiProviderById = async (
     id: string,
-    decryptor: DecryptUserKeyVaults,
+    decryptor?: DecryptUserKeyVaults,
   ): Promise<AiProviderDetailItem | undefined> => {
     const query = this.db
       .select({
         checkModel: aiProviders.checkModel,
+        description: aiProviders.description,
         enabled: aiProviders.enabled,
         fetchOnClient: aiProviders.fetchOnClient,
         id: aiProviders.id,
@@ -202,10 +204,15 @@ export class AiProviderModel {
 
     const keyVaults = !!result.keyVaults ? await decrypt(result.keyVaults) : {};
 
-    return { ...result, keyVaults } as AiProviderDetailItem;
+    return {
+      ...result,
+      fetchOnClient: typeof result.fetchOnClient === 'boolean' ? result.fetchOnClient : undefined,
+      keyVaults,
+      settings: isEmpty(result.settings) ? undefined : result.settings,
+    } as AiProviderDetailItem;
   };
 
-  getAiProviderRuntimeConfig = async (decryptor: DecryptUserKeyVaults) => {
+  getAiProviderRuntimeConfig = async (decryptor?: DecryptUserKeyVaults) => {
     const result = await this.db
       .select({
         fetchOnClient: aiProviders.fetchOnClient,
